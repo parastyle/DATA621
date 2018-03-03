@@ -1,0 +1,42 @@
+---
+title: "643 Discussion 1"
+author: "Michael Muller"
+date: "June 15, 2017"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Now that we have covered basic techniques for recommender systems.  
+Choose one commercial recommender and describe how you think it works (content-based, collaborative filtering, etc).  
+Does the technique deliver a good experience or are the recommendations off-target?
+
+I've chosen the Steam recommender system; a hybrid recommender system.  
+The statistics steam collects on you are :
+
+#### Which users are your friends
+#### Your owned items
+#### Your item ratings
+#### The time you spend with each item
+#### The amount of money you spend
+
+While I can not pin point what exactly steam does to recommend new items to its users; I can imagine how they use each metric.  
+
+The friends list you build probably weighs in on their collaborative filtering process; where all similarity measures regarding friends have a flat boost as opposed to users in your same neighborhood.  
+
+Owned items definitely is used for a item based recommendation where term frequency comes into play with the attributed item tags.  
+
+Time spent with an item carries a weight to how much you really "liked" an item; could possibly replace item ratings because this data is dense; unlike ratings.  
+
+Amount of money you spend on items definitely helps the recommender system select items in your price range.  
+
+Item ratings is probably used in a user-item matrix to help finalize whatever results the above metrics gave us.  
+
+I found a neat article on someone who tried to improve the steam recommender system : http://dataconomy.com/2014/08/improving-steam-recommendations/  
+
+He used a main metric of time spent with an item; then filtered his results with Pearsons R correlation; and logarithmic likelihood ratios.

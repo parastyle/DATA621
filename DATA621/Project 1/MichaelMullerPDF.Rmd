@@ -1,0 +1,301 @@
+---
+title: "DATA 621 Project 1"
+author: "Michael Muller"
+date: "February 25, 2018"
+output:
+  pdf_document:
+    df_print: kable
+    highlight: tango
+  html_document:
+    df_print: paged
+  prettydoc::html_pretty:
+    highlight: github
+    theme: tactile
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+#https://stackoverflow.com/questions/9341635/check-for-installed-packages-before-running-install-packages
+requiredPackages = c('knitr','prettydoc','kableExtra','ggplot2','tidyr','plyr','dplyr','psych','corrplot','mice','VIM')
+for(p in requiredPackages){
+  if(!require(p,character.only = TRUE)) install.packages(p)
+  library(p,character.only = TRUE)
+}
+#Load Data
+train = read.csv('moneyball-training-data.csv')
+test = read.csv('moneyball-evaluation-data.csv')
+```
+
+# DATA EXPLORATION pt.1
+
+The moneyball dataset contains roughly 2200 observations of baseball team statistics from 1871 to 2006.  
+
+All the data is represented in the form of integers; the point of this project is to create a multiple linear regression model that best predicts the number of wins from their in-game statistics of that year.  
+
+### Below is a brief description of all our datapoints.  
+
+
+The dataset contains  
+
+7 discrete variables on *Batting*  
+
+2 discrete variables on *Base Running*  
+
+2 discrete variables on *Fielding*  
+
+4 discrete variables on *Pitching* 
+
+ 
+
+### Below are the only 6 variables that theoretically impact number of wins NEGATIVELY  
+#### Variable Desc | [ Variable Name ]  
+
+Strikeouts by batter | *[ TEAM_BATTING_SO  ]*  
+
+Caught stealing (bases) | *[ TEAM_BASERUN_CS  ]*  
+
+Errors | *[ TEAM_FIELDING_E  ]*  
+
+Walks Allowed | *[ TEAM_PITCHING_BB ]*  
+
+Hits Allowed | *[ TEAM_PITCHING_H ]*  
+
+Homeruns Allowed | *[ TEAM_PITCHING_HR ]*  
+
+#### Thoughts  
+
+All of these variables contain metrics on 'bad actions' during baseball. The players want to minimize these numbers with little exception (Advanced pitching tactics/strategies (A coach may want the pitcher to allow a walk, rather than risk a hit or homerun)) in order to win their current game.  
+
+The inverse of this is also true; all 'good actions' during baseball are considered theoretically positive impacts on wins.
+
+# DATA EXPLORATION pt.2
+
+
+There are `r sum(complete.cases(train))` complete cases
+
+```{r}
+#Simple way to find missing data metrics (too many variables for the mice plot to map on a PDF)
+completeCases = data.frame(
+  abbre = names(train),
+  dataPoints = as.vector(rapply(train,function(x)sum(!is.na(x)))),
+  missingData = as.vector(rapply(train,function(x)dim(train)[1]-(sum(!is.na(x)))))
+)
+columnNames = c('Variable','# Observed','# Missing')
+colnames(completeCases) = columnNames
+knitr::kable(completeCases,row.names = TRUE)
+```
+
+
+```{r,results='asis'}
+knitr::kable(describe(train),row.names = FALSE)
+```
+
+A few noticeable figures would be
+
+1) The strong positive skews on Pitching|Allowed hits, and Pitching|Strikeouts.  
+
+2) Were going to need to scale down a few variables with high ranges
+
+3) Definitely going to remove TEAM_BATTING_HBP for its lack of observations and low range
+
+# Figure 1 : Histograms
+```{r,warning=FALSE, results='hide', cache.lazy=FALSE, message=FALSE}
+#Here we remove the index and load Hmisc for a multi-hist plot
+mmDF = train[2:dim(train)[2]]
+library(Hmisc)
+hist.data.frame(mmDF[1:9])
+```
+.
+```{r}
+hist.data.frame(mmDF[10:dim(mmDF)[2]])
+```  
+
+# Figure 2 : Correlation matrix plot
+```{r}
+#Creating a correlation matrix to address multi-colinearity issues
+correlationMatrix = cor(mmDF, use='complete.obs')
+corrplot(correlationMatrix, method="pie")
+```
+  
+  
+In *Figure 1* we can see near normal distributions for most variables.  However we can see strong skews from TEAM_FIELDING_DP, TEAM_BATTING_BB, TEAM_BATTING_3B, TEAM_BASERUN_SB. We will need to fix this.  
+We also see two bimodal distributions in TEAM_PITCHING_HR, TEAM_BATTING_SO, and what appears to be a multi-modal dist. from TEAM_BATTING_HR.  
+Extreme outliers distorting our views of TEAM_PITCHING_H, and TEAM_PITCHING_SO.  
+
+In *Figure 2* we can see strong correlations in the following sets.
+
+TEAM_PITCHING_H :: TEAM_BATTING_H  
+
+TEAM_PITCHING_HR :: TEAM_BATTING_HR  
+
+TEAM_PITCHING_BB :: TEAM_BATTING_BB
+
+TEAM_PITCHING_SO :: TEAM_PITCHING_SO
+
+Relation? I'm not sure, I don't know too much about baseball, but we don't want our predictor variables to predict themselves. This brings up issues of multicollinearity which can make our parameters indeterminate and increase standard errors across the board.   
+*Note that they are not direct correlations because special circumstance through umpires who can alter rules and give freebees*  
+What we will do though, is remove one corresponding variable, least normally distributed from each pairing.  
+
+Also in *Figure 2* we see our most influential observation! The variables most strongly correlated with winning. Behold as they appear to be the same variables, in which we will be removing one half (Minus strikeouts).  
+[TEAM_FIELDING_E,TEAM_FIELDING_DP,TEAM_BATTING_2B] have a second tier priority in our upcoming regressions due to their favorable correlations under big 3 [Walks,Homeruns,Basehits].
+
+# DATA PREPARATION
+
+We remove the Pitching pairings that are too closely correlated with Batting
+
+We remove TEAM_BATTING_HBP and TEAM_BASERUN_CS for having too many missing data points
+```{r}
+#Drop troublesome explanatory variables
+drops = c('TEAM_BATTING_HBP','TEAM_BASERUN_CS','TEAM_PITCHING_H','TEAM_PITCHING_HR','TEAM_PITCHING_SO','TEAM_PITCHING_BB')
+mmDF = mmDF[,!(names(mmDF) %in% drops)]
+```
+
+
+### Removal of the 7 most problematic variables(80.6% of our observations are complete)  
+
+
+```{r}
+#Using the mice package to identify the missing variables again
+missingValuePlot = aggr(mmDF, col=c('navyblue','purple'),
+                    numbers=TRUE, sortVars=TRUE,
+                    labels=names(mmDF), cex.axis=.4,
+                    gap=3, ylab=c("Missing data","Pattern"))
+```  
+
+  
+It is clear were going to need to impute some values to make a great predictive model.  
+
+  
+  
+  
+
+  
+### We have two objectives left to fix this data.  
+1) Impute data to fill missing data  
+2) Cap extreme + infrequent outliers that exist outside 1.5 x IQR  
+
+
+We use 40 iterations of predictive mean matching to complete our dataset, then we can remove some bad leverage points by capping outliers.  
+
+
+```{r}
+#imputing data with mice library
+imputedData = mice(mmDF, m=1, maxit = 40, method = 'pmm', seed = 15)
+mmDF=complete(imputedData)
+```  
+.  
+
+
+Moving on to capping outliers   
+
+*Figure 1* identified [BASERUN_SB,FIELDING_E] as the variables with extreme & infrequent outliers  
+
+```{r}
+#http://r-statistics.co/Outlier-Treatment-With-R.html 
+vector.capper = function(x){
+qnt <- quantile(x, probs=c(.25, .75), na.rm = T)
+caps <- quantile(x, probs=c(.05, .95), na.rm = T)
+H <- 1.5 * IQR(x, na.rm = T)
+x[x < (qnt[1] - H)] <- caps[1]
+x[x > (qnt[2] + H)] <- caps[2]
+return(x)
+}
+```  
+```{r}
+#Quick and fancy histograms to show before/after histograms
+par(mfrow=c(2,2))
+p1 = hist(mmDF$TEAM_BASERUN_SB,plot=FALSE)
+p2 = hist(vector.capper(mmDF$TEAM_BASERUN_SB),plot=FALSE)
+plot( p1, col=rgb(0,1,0,1/5),main='Difference after capping outliers',xlab='Stolen Bases')
+plot( p2, col=rgb(1,0,0,1/4), add=T)  
+p1 = hist(mmDF$TEAM_FIELDING_E,plot=FALSE)
+p2 = hist(vector.capper(mmDF$TEAM_FIELDING_E),plot=FALSE)
+plot( p1, col=rgb(0,1,0,5/10),main='Difference after capping outliers',xlab='Fielding Errors')
+plot( p2, col=rgb(1,0,1,1/2), add=T)  
+mmDF$TEAM_FIELDING_E = vector.capper(mmDF$TEAM_FIELDING_E)
+mmDF$TEAM_BASERUN_SB = vector.capper(mmDF$TEAM_BASERUN_SB)
+```  
+
+We're done transforming our data for now
+
+
+# BUILD MODELS
+
+### Our first model will be the most basic; using every variable available to us
+```{r}
+#Establish model 1 and plot
+fit = lm(TARGET_WINS ~., data=mmDF)
+summary(fit)
+par(mfrow=c(2,2))
+plot(fit)
+
+```
+
+
+
+Looking at all our variables performing in the summary. We see everything other than Batting_2B has an impossibly low p-value and are significant.  
+Looking at the plots; we see all our variables are normally distributed with a few outliers (Normal Q-Q), and almost all our points are low influence (Residuals vs. Leverage plot,) which tells me I want to stray away from dropping variables at this point.  
+
+Lets try a new model using intuition for experimental purposes; not intended to beat the .33 R^2.  
+
+We're going to try using variables with only the lowest standard error to see if it ellucidates our situation, before looking back to model 1.  
+
+
+```{r}
+#establish model 2 and summary
+fit2 = lm(TARGET_WINS~TEAM_BATTING_SO +TEAM_FIELDING_E +TEAM_BASERUN_SB +TEAM_BATTING_HR +TEAM_BATTING_BB,data=mmDF)
+summary(fit2)
+```  
+  
+This model's R^2 statistic is 10% less than model 1; and can only explain 23% of our outcomes variability.  
+
+Lets take a look at all the variables in an ANOVA test  
+
+```{r}
+#Anova all explanatory variables
+anova(fit)
+```  
+
+The F-statistic for 3 Base batting and batting strikeouts is so low, I'm going to have to reject both variables as good predictors in my model.  Lets try one last model without them.  
+
+```{R}
+#Create modified model
+fit3 = lm(TARGET_WINS~ TEAM_BATTING_H+TEAM_BATTING_2B+TEAM_BATTING_HR+TEAM_BATTING_BB+TEAM_BASERUN_SB+TEAM_FIELDING_E+TEAM_FIELDING_DP,data=mmDF)
+summary(fit3)
+```
+A high p-value on TEAM_BATTING_2B which has already shown high correlation to TEAM_BATTING_H and TEAM_BATTING_3B gives us more insight on the nature of our variables. For further regression analysis; we may want to transform batting H, 2B, 3B, HR. I believe because all these explanatory variables have to do with capturing bases; it may pose some multi-colinearity issues.  
+
+Because We have the highest F-statistic with a near 0 p-value on the third model, I want to check the residual plots.  
+
+```{r}
+#plot model 3
+par(mfrow=c(2,2))
+plot(fit3)
+```
+# SELECT MODELS
+
+I've selected model 1 at a R^2 at .33. Using all the explanatory variables (after transformation and tidying) seemed to give us best results. Our leverage plots for model 1 showed nothing outside of Cook's distance *unlike model 3* and for the most part, the theoretical quantiles lined near normally to our standardized residuals.  Because the nature of the baseball wins happens to be mean centered it was hard to identify any unusual trends or patterns in the standard residual plot.  
+Our model summaries showed strong significance all around the board, with ANOVA showing us p-values that just barely made it under our significance levels, so I chose to keep them if they would give better correlations. I was torn between model 3's high F-statistic and relatively same R2 score; but with more than a few bad leverage points showing and a larger MSE, I selected model 1. Lets see how it does on the test data.  
+
+```{r}
+#predict values and write to csv
+predicted = predict(fit,test)
+hist(predicted)
+```  
+
+For our predicted wins; we have mean centered just above 80, and a right skew (which is good.) It means fewer teams won more games which is naturally how sports work. Many teams lose too many games and stop playing for the season where as the winners keep playing. Since the evaluation data lacks
+
+```{r}
+write.csv(predicted,'MMullerPredictions.csv')
+```
+
+
+
+
+
+
+
+## Code Appendix
+
+```{r, ref.label=knitr::all_labels(),echo=TRUE,eval=FALSE}
+```
