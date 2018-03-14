@@ -1,0 +1,130 @@
+---
+title: "Project 2"
+author: "Michael Muller"
+date: "March 12, 2018"
+output:
+  pdf_document:
+    df_print: kable
+    highlight: tango
+  html_document:
+    df_print: paged
+  prettydoc::html_pretty:
+    highlight: github
+    theme: tactile
+---
+
+```{r setup, include=FALSE,warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE,fig=TRUE)
+#https://stackoverflow.com/questions/9341635/check-for-installed-packages-before-running-install-packages
+library(knitr)
+```
+
+##(1) Load Data
+```{r}
+wData = read.csv('cod.csv')
+theData = wData[c('class',
+                  'scored.class',
+                  'scored.probability')]
+```
+
+##(2) Display data using table()
+```{r}
+myT = table(theData$scored.class,theData$class)
+myT
+```  
+#### 119 TP, 5 FP, 27 TP, 30 FN  
+
+##(3-8) Utilize the following functions
+(3) Write a function that computes accuracy
+(4) Write a function that computes error rate
+(5) Write a function that computes precision
+(6) Write a function that computes sensitivity
+(7) Write a function that computes specificity
+(8) Write a function that computes F1 score  
+
+  
+  
+
+
+```{r}
+classificationMetrics = function(myT){
+  TP = myT[1,1]
+  FN = myT[1,2]
+  FP = myT[2,1]
+  TN = myT[2,2]
+  accuracy = (TP+TN)/(TP+TN+FP+FN)
+  error = (FP+FN)/(TP+FP+TN+FN)
+  precision = (TP)/(TP+FP)
+  sensitivity = (TP)/(TP+FN)
+  specificity = (TN)/(TN+FP)
+  f1 = (2*precision*sensitivity)/(precision+sensitivity)
+  return(data.frame(accuracy,error,precision,sensitivity,specificity,f1))
+}
+```  
+
+##(9) What are the bounds on the F1 score?  
+F1 equals  
+![](f1.png)  
+The metrics of Sensitivity and Specificity can never exceed a range of 0 to 1; and the algorithim is set up 
+so that the product of the two is dividing by their summation. The F1 score range is 0 to 1.
+
+
+##(10) Calculate ROC and AUC using class and scored.probability  
+
+```{r}
+#http://blog.revolutionanalytics.com/2016/08/roc-curves-in-two-lines-of-code.html
+rocauc = function(classification, probability){
+  #Sort observed outcomes by probability descending
+  classification = classification[order(probability,decreasing=TRUE)]
+  #Calculate Sens and Spec
+  roc_frame = data.frame(TPR=cumsum(classification)/sum(classification),
+                         FPR=cumsum(!classification)/sum(!classification), 
+                         classification)
+  #Calculate AUC below
+  
+  #because the thresholds are discrete; we need to calculate the distance between TPR/FPR...We will use diff()
+  diffTPR = c(diff(roc_frame$TPR),0)
+  diffFPR = c(diff(roc_frame$FPR),0)
+  #Now that we have the perimeter measurements of each rectangle under the curve TPR/FPR
+  #and our best guess on the area delimited by the actual curve
+  #We can compute the area under the curve with a summation of WxL's
+  auc = sum(roc_frame$TPR*diffFPR)+sum(diffTPR*diffFPR)/2
+  return(list(roc_frame,auc))
+}
+rocauc = rocauc(theData$class,theData$scored.probability)
+```
+
+
+```{r}
+library(ggplot2)
+#plot(rocauc[[1]]$TPR~rocauc[[1]]$FPR,xlab=('Specificity'),ylab=('Sensitivity'))
+#abline(a = 0, b = 1)
+ggplot(data=rocauc[[1]],aes(FPR,TPR)) +geom_line() + geom_abline()
+paste('The AUC is ',rocauc[[2]])
+```  
+
+##(11) Use the function created in 3-8
+```{r}
+classificationMetrics(myT)
+```  
+
+##(12) Compare my metrics with the caret package (confusionMatrix(), sensitivity/specificity)  
+```{r}
+library(caret)
+#Default CM call outputs their sensitivity and specificity
+confusionMatrix(theData$class,theData$scored.class)
+```  
+
+Every metric of confusionMatrix mimics mine. This is due to the fact that these results are not up for variation or debate. It is simply a computation of predefined numbers. 
+The best part of this package (for my sake) is the identification of a positive class automatically.
+
+##(13) Investigate the pROC package. Generate an ROC and compare to mine.
+```{r}
+library(pROC)
+theRock = roc(class~scored.probability,data=theData)
+plot(theRock,asp=NA)
+theRock$auc
+```  
+
+Great, pROC package mimics my ROC (Thanks to a brilliant website) 
+#### http://blog.revolutionanalytics.com/2016/11/calculating-auc.html
