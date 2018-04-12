@@ -1,0 +1,263 @@
+---
+title: "DATA 621 Project 3"
+author: "Michael Muller"
+date: "April 06, 2018"
+output:
+  pdf_document:
+    df_print: kable
+    highlight: tango
+  html_document:
+    df_print: paged
+  prettydoc::html_pretty:
+    highlight: github
+    theme: tactile
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+#https://stackoverflow.com/questions/9341635/check-for-installed-packages-before-running-install-packages
+requiredPackages = c('knitr','prettydoc','kableExtra','ggplot2','tidyr','plyr','dplyr','psych','corrplot','mice','VIM','reshape2','RCurl','caret','pROC')
+for(p in requiredPackages){
+  if(!require(p,character.only = TRUE)) install.packages(p)
+  library(p,character.only = TRUE)
+}
+#Load Data
+train = read.csv('crime-train.csv')
+```
+
+
+#Overview  
+## Explore, analyze, and model the crime dataset  
+
+### Four parts [Data Exploration, Data Preparation, Model Building, Model Selection]
+
+
+## 1. DATA EXPLORATION
+
+### Briefing  
+
+There are `r sum(complete.cases(train))`/`r dim(train)[1]` complete cases in the training dataset.  
+
+The dataset contains 466 observations with 12 features we will use for predicting the 13th feature, our target variable.  
+
+Our target variable indicates whether or not the crime rate in this particular observation is above the 'median crime rate' of the whole.  
+
+The testing dataset contains 40 observations, and our training dataset contains equal number positive/negative targets. So tracking our ROC curve will be of critical importance.  
+
+
+### Feature notes  
+
+[zn,rad,tax,target] are all discrete variables  
+
+[indus,nox,rm,age,dis,ptratio,lstat,medv] are all continuous variables  
+
+4 Discrete, 7 Continuous, 1 Categorical predictor features (chas = dummy variable) - (Binning will be considered for the continous features with low correlation to target)  
+
+### Various feature statistics  
+
+The following two charts show similar distributional traits among most features with Highway accessibility, Residential Zoning, and Property Tax lying outside the norm with disproportionate mean/medians.  
+
+High skew for residential zoning, median value of homes, distance to employment centers and whether or not they're near the river. The nature of these variables is that groups of similar values are clustered together geographically. (The house farthest away from employment centers is most probably the closest house to the house 2nd farthest away from employment centers.) Something to consider, can't draw a conclusion yet.  
+
+In cases where the median is not 50% of the range, we can expect to see some proportionate skew. Lets confirm that in figure 2, I predict skew in almost every variable. Which may mean significant transformations need to be made.  
+
+....  
+
+.....  
+
+......  
+
+
+
+
+# Figure 1 : Statistics
+
+```{r}
+#Simple way to find missing data metrics (too many variables for the mice plot to map on a PDF)
+descriptions = c('Residential land zoning','Industry land zoning','Borders River','Nitrogen Oxide levels','Avg rooms per dwelling','Amt of old buildings','Distance to employment centers','Highway accessibility','Property tax','Pupil-teacher ratio','Lower status of population','Median value of residential homes (In 1000 increments)','Target value')
+myVars = data.frame(
+  abbre = names(train),
+  descr = descriptions
+)
+columnNames = c('Feature','Description')
+colnames(myVars) = columnNames
+knitr::kable(myVars,row.names = TRUE)
+```
+
+```{r,results='asis'}
+ting = describe(train)
+ting = ting[,-c(2,6,7,8,9)]
+knitr::kable(ting,row.names = FALSE)
+```  
+  
+  
+# Figure 2 : Histograms
+```{r,warning=FALSE, results='hide', cache.lazy=FALSE, message=FALSE}
+#load Hmisc for a multi-hist plot
+library(Hmisc)
+hist(train[1:9],na.big = FALSE)
+```
+.
+```{r}
+hist(train[9:13],na.big = FALSE)
+```  
+
+# Figure 3 : Correlation matrix plot
+```{r}
+#Creating a correlation matrix to address multi-colinearity issues
+correlationMatrix = cor(train, use='complete.obs')
+corrplot(correlationMatrix, method="pie")
+```  
+
+In *Figure 2* we can see near normal distributions for medv and rm. With lstat,dis,rad,tax, and nox farther off. We may need to transform them. In particular we see dis,lstat, and age victim of a stride and true right skew.  
+
+
+In *Figure 3*   
+
+We can see strong positive correlations in the following sets.  
+
+indus, age, rad, tax, lstat, target :: nox  
+
+We can see strong negative correlations in the following sets.  
+
+indus, nox, age, rad, tax, target :: dis  
+
+Nitrogen Oxide levels and Distance to employment centers seem to be two major players in this soon-to-be classifier. Both opposed to each other.  
+
+There appears to be some issues of multi-collinearity between Highway accessibility index and Property Tax seeing as their correlations are a little too strong. Lets keep an eye on that. I don't think we'll need to take a variable out or transform either one to compensate. When we get to the GLM I would recommend using an interactive term.  
+
+#Figure 4 : Boxplots of target ~ feature variance
+
+```{r}
+#https://stackoverflow.com/questions/14604439/plot-multiple-boxplot-in-one-graph/14606549
+train2= train
+train2$target = ifelse(train$target==1,'High Crime','Low Crime')
+train.m = melt(train2,id.var='target')
+require(ggplot2)
+p = ggplot(data = train.m, aes(x=variable, y=value)) 
+p = p + geom_boxplot(aes(fill = target))
+# if you want color for points replace group with colour=Label
+p = p + geom_point(aes(y=value, group=target), position = position_dodge(width=0.75))
+p = p + facet_wrap( ~ variable, scales="free")
+p = p + xlab("x-axis") + ylab("y-axis") + ggtitle("Variance in target ~ feature")
+p = p + guides(fill=guide_legend(title="Legend_Title"))
+p 
+
+```  
+
+The following figure shows us that in addition to fixing the distributional right skews of dis, lstat and age we should consider fixing zn, nox, tax, and rad through transformations to minimize their target variation.  
+
+# 2. DATA PREPERATION
+
+To prep this data, I'm going to make three datasets.  I didn't find anything worthy of binning; no insane skews worthy of datapoint capping and 0 missing data to work with.  
+
+Variables we don't touch [zn,chas,target]
+
+1) Original dataset with transformed [dis,lstat,age] with log
+
+2) A log normalized dataset as a lazy baseline 
+
+3) Transform [dis,lstat,age,zn,nox,tax,rad] with both quadratic and log terms. Together that is more than half the dataset which may make me a perpetrator of overfitting. I should be able to find a working model with these features + base dataset.  
+
+
+```{r}
+trainT = data.frame(
+ldis = log(train$dis),
+llstat = log(train$lstat),
+lage = log(train$age),
+zn2 = train$zn^2,
+nox2 = train$nox^2,
+tax2 = train$tax^2,
+rad2 = train$rad^2)
+dataset1 = train
+dataset2 = log(train)
+dataset2$zn = train$zn
+dataset2$target = train$target
+dataset2$chas = train$chas
+dataset3 = cbind(train,trainT)
+```  
+
+# 3. BUILD MODELS 
+
+I want to build 4 models and branch out from there.  
+1) Standard dataset model, all features included
+2) Log transformed dataset model, all features included
+3) Added transformed log and quadratic terms ontop of standard dataset
+4) Standard dataset model important features (found from previous 3 models) + interactive property tax and highway accessibility term as noted in the data exploration
+```{r}
+#Model 1 : Original dataset
+m1 = glm(data=dataset1,target~.,family=binomial)
+summary(m1)
+```  
+Our original dataset model with all variables has an AIC of 218.05 with a sample over 400, meaning it may be an accurate metric over BIC.  
+
+Null deviance of almost 650. Significant variables include [rad,nox, dis,medv, ptratio].  
+
+```{R}
+#Model 2 : Log transformed dataset 
+m2 = glm(data=dataset2,target~.,family=binomial)
+summary(m2)
+```  
+AIC up, residual deviance up. Again significant variables are nox and tax.  
+
+```{r}
+#Mddel 3 : Log and Quad transformed dataset
+m3 = glm(data=dataset3,target~.,family=binomial)
+summary(m3)
+```  
+As predicted, model 3 is overfitted (I believe thats what the error message means 'Fitted probabilities numerically 0 or 1 occurred).  However the residual deviance is at an all time low of 130. I may want to go back here and use a step-wise model fitting algorithm.  Lets see the last base model.  
+
+```{r}
+m4 = glm(data=dataset1,target~ dis+tax:rad+medv+dis+age)
+summary(m4)
+```  
+Model 4 seems to be a clear winner (for now) With residual deviance roughly 1/4 the size of model 1, with estimated 150% dataloss (judging from AIC) I like this model because it doesn't overfit like model 3. A very rough and right estimator...Im proud of this one. Lets not give up on model 3 though.  
+
+```{r}
+m5 = step(m3,direction = 'forward')
+m5
+```  
+
+```{r}
+anova(m4,m5, test="Chisq")
+```
+
+### Verdict : Model 4 (Interactive tax:rad + significant features) has almost double the AIC and a third of the residual deviance with no bad indicators from ANOVA. While our 19 feature freak-beast overfitted model 3 has a lower AIC after forward step selection, it fails in comparison to goodness of fit to model 4 and ultimately, we want to shy away from too many features in any model.  
+
+# 4. SELECT MODELS
+
+We've selected model 4. Less residual deviance and less features. Lets evaluate it.
+
+```{r}
+#https://www.r-bloggers.com/evaluating-logistic-regression-models/
+trainE = createDataPartition(train$target,p=.6,list=FALSE)
+trainingData = train[ trainE, ]
+testingData = train[ -trainE, ]
+pred4 = predict(m4, newdata=testingData)
+pred4 = ifelse(pred4<.5,0,1)
+theMatrix = confusionMatrix(data=pred4,testingData$target,positive = '1')
+theMatrix
+```  
+
+Accuracy of .81 with minimum type I & II errors, 0 P-value. Around .8 Sensitivity and Specificity. All this using near 4 features. 
+
+```{r}
+theRock = roc(testingData$target, pred4)
+plot(theRock,asp=NA,main='ROC')
+theRock$auc
+```  
+
+AUC at .81 is fantastic at a .5 threshhold. Lets send in our predictions.
+
+```{r}
+#Load Data
+test = read.csv('crime-eval.csv')
+finalPred =predict(m4, newdata=test)
+finalPred = ifelse(finalPred<.5,0,1)
+hist(finalPred)
+write.csv(finalPred,'MMullerPredictions.csv')
+```
+## Code Appendix
+
+```{r, ref.label=knitr::all_labels(),echo=TRUE,eval=FALSE}
+```
