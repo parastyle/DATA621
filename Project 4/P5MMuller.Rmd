@@ -1,0 +1,347 @@
+---
+title: "DATA 621 Project 4"
+author: "Michael Muller"
+date: "April 22, 2018"
+output:
+  pdf_document:
+    df_print: kable
+    highlight: tango
+  html_document:
+    df_print: paged
+  prettydoc::html_pretty:
+    highlight: github
+    theme: tactile
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+#https://stackoverflow.com/questions/9341635/check-for-installed-packages-before-running-install-packages
+requiredPackages = c('knitr','prettydoc','kableExtra','ggplot2','tidyr','plyr','dplyr','psych','corrplot','mice','VIM','reshape2','RCurl','caret','pROC','vcd')
+for(p in requiredPackages){
+  if(!require(p,character.only = TRUE)) install.packages(p)
+  library(p,character.only = TRUE)
+}
+#Load Data
+train = read.csv('insurance_training_data.csv',na.strings=c(""," ","NA"))
+eval = read.csv('insurance_evaluation_data.csv',na.strings=c(""," ","NA"))
+```
+# Overview   
+
+## The task  
+  
+  Finalize two models using the insurance_training_data.csv 
+  
+  |Binary logistic regression model| *predicting whether or not a person will crash their car*  
+  
+  |Multivariate linear regression model| *predicting the cost of crashing a car*  
+  
+## The restraints  
+  
+  Only data from the training_set may be used  
+  
+  |The training_set contains| *8161 raw observations*  
+  
+  |The training_set contains| *26 features (including index and targets)*  
+  
+# 1. DATA EXPLORATION  
+
+Taking a look into our dataset  
+![](head1.png)  
+![](train2.png)  
+
+This is no good; we need to tidy this data, and create a method to tidy further datasets of the same features.  Features such as CAR_USE (with two possible values) should be converted to binary format, and miscellaneous text such as '$' and 'z_' should be filtered out of any value for easier analysis.  
+
+```{r}
+toBinary = function(aVector,one){
+  return(ifelse(aVector==one,1,0))
+}
+toClean = function(aVector,isNumeric){
+  if(isNumeric==TRUE){
+    return(as.numeric(gsub('\\$|,','',aVector)))
+  }
+  return(sub('z_|Z_','',aVector))
+}
+toDataset = function(d){
+  d$INDEX = NULL
+  d$INCOME = toClean(d$INCOME,TRUE)
+  d$PARENT1 = toBinary(d$PARENT1,'Yes')
+  d$MSTATUS = toBinary(d$MSTATUS,'Yes')
+  d$HOME_VAL = toClean(d$HOME_VAL,TRUE)
+  d$SEX = toBinary(d$SEX,'M')
+  d$EDUCATION = toClean(d$EDUCATION,FALSE)
+  d$JOB = toClean(d$JOB,FALSE)
+  d$CAR_USE = toBinary(d$CAR_USE,'Commercial')
+  d$BLUEBOOK = toClean(d$BLUEBOOK,TRUE)
+  d$CAR_TYPE = toClean(d$CAR_TYPE,FALSE)
+  d$RED_CAR = toBinary(d$RED_CAR,'yes')
+  d$OLDCLAIM = toClean(d$OLDCLAIM,TRUE)
+  d$REVOKED = toBinary(d$REVOKED,'Yes')
+  d$URBANICITY = toBinary(d$URBANICITY,'Highly Urban/ Urban')
+  return(d)
+}
+train = toDataset(train)
+eval = toDataset(eval)
+```
+
+Lets check out the data's sparsity using the MICE package in R.  
+Interpretting the figure below; we have
+
+```{r out.width = '70%'}
+#Using the mice package to identify the missing variables again
+missingValuePlot = aggr(train, col=c('orange','yellow'),
+                    numbers=TRUE, sortVars=TRUE, only.miss=TRUE, combined=TRUE,
+                    labels=names(train), cex.axis=.4,
+                    gap=3, ylab=c("Missing data","Pattern"))
+```  
+Awesome! No missing target data. Most missing data is numeric so we can use data imputation to give us a fuller set of data to work with. More on that during DATA PREPERATION.  
+
+Lets move on to the distributions of our numeric data, checking boxplots and histograms.  
+
+
+# Figure 1 : Boxplots
+```{r,warning=FALSE, results='hide', cache.lazy=FALSE, message=FALSE}
+#https://stackoverflow.com/questions/14604439/plot-multiple-boxplot-in-one-graph/14606549
+theNumerics = c('KIDSDRIV','HOMEKIDS','YOJ','AGE','INCOME','HOME_VAL','TRAVTIME','BLUEBOOK','TIF','OLDCLAIM','CLM_FREQ','MVR_PTS','CAR_AGE')
+notNumerics = c('PARENT1','MSTATUS','SEX','EDUCATION','JOB','CAR_USE','CAR_TYPE','RED_CAR','REVOKED','URBANICITY')
+nonNum = train[,notNumerics]
+theNums = train[,theNumerics]
+train2 = train[,theNumerics]
+train2$TARGET_FLAG = train$TARGET_FLAG
+train2$TARGET_FLAG = ifelse(train$TARGET_FLAG==1,'Crash','No Crash')
+train.m = melt(train2,id.var='TARGET_FLAG')
+require(ggplot2)
+p = ggplot(data = train.m, aes(x=variable, y=value)) 
+p = p + geom_boxplot(aes(fill = TARGET_FLAG))
+# if you want color for points replace group with colour=Label
+p = p + facet_wrap( ~ variable, scales="free")
+p = p + xlab("x-axis") + ylab("y-axis") + ggtitle("Variance in target ~ numeric feature")
+p = p + guides(fill=guide_legend(title="Legend_Title"))
+p 
+```  
+
+
+# Figure 2 : Histograms
+```{r,warning=FALSE, results='hide', cache.lazy=FALSE, message=FALSE}
+library(Hmisc)
+train2$TARGET_FLAG = NULL
+hist(train2[1:6],na.big = FALSE)
+hist(train2[7:13],na.big=FALSE)
+```  
+
+# Figure 3 : Correlation matrix plot
+```{r}
+#Creating a correlation matrix to address multi-colinearity issues
+train3 = train2
+train3$TARGET_FLAG = train$TARGET_FLAG
+train3$TARGET_AMG = train$TARGET_AMT
+correlationMatrix = cor(train3, use='complete.obs')
+corrplot(correlationMatrix, method="pie")
+```  
+
+The following figures present both good and bad information.  
+
+|The Good| We have near normal distributions for bluebook, travtime, YOJ, age, and INCOME. Our boxplots show some even TARGET prediction spreads, and the correlation matrix shows no issues of multi-colinearity.  
+
+*We may want to take the log of BLUEBOOK,TRAVTIME, YOJ for more normal distributions*  
+
+|The Bad| We have high frequency 0 values in most of our distributions and CLM_FREQ boxplot shows we may need to alter that variable.  
+
+*Which means we may need to treat many of these variables as factors, or make new features entirely.*  
+
+Lets look at a few mosaic plots to see the interaction between a few variables for input on possible imputations.  
+
+
+# Figure 4 : Mosaic plot  
+
+```{r out.height= '30%', out.width='50%'}
+mosaicplot(table(train$JOB,train$EDUCATION),col = hcl(c(110, 50)),main= 'Job vs Education')
+mosaicplot(table(train$AGE,train$YOJ),col = hcl(c(190, 10)),main= 'Age vs Years on Job')
+```  
+We can see two trends from the two mosaic plots (Ones a bit harder to see).  
+
+|Trend 1| Higher education means higher ranking jobs. However there is too much variation to make any other assumption that a lawyer has a bachelors which already accounted for.     
+
+|Trend 2| Aside from the 50th percentile area; YOJ goes up with age   
+
+Unfortunately, Trend 2 is too weak to base imputation on...we'll use traditional methods instead  
+
+
+# 2. DATA PREPERATION  
+
+## Outline of data preperation  
+
+Issue | Remedy  
+
+Missing Values | Imputation.  
+
+Many distributions are bimodal | Make binary features from existing features.  
+
+Too many features, parsimony issue | Restrict to maximum of 10 predictors per model.  
+
+Many distributions can be normalized | Take log  
+
+```{r}
+imputedData = mice(train, m=2, maxit = 5, method = 'pmm', seed = 15)
+train=mice::complete(imputedData,2)
+train = train[complete.cases(train), ]
+missingValuePlot = aggr(train, col=c('orange','yellow'),
+                    numbers=TRUE, sortVars=TRUE, only.miss=FALSE, combined=TRUE,
+                    labels=names(train), cex.axis=.4,
+                    gap=3, ylab=c("Missing data","Pattern"))
+```  
+Good, no missing data. Lets go on categorizing our oddly distributed features  
+
+```{r}
+ #HOMEKIDS, HOME_VAL,TIF,MVR_PTS, CLM_FREQ,OLDCLAIM,CAR_AGE, YOJ
+train2 = train
+train2$KIDSDRIV = ifelse(train$KIDSDRIV==0,0,1)
+train2$HOMEKIDS = ifelse(train$HOMEKIDS==0,0,ifelse(train$HOMEKIDS>3,2,1))
+train2$HOME_VAL = ifelse(train$HOME_VAL==0,0,ifelse(train$HOME_VAL<quantile(train$HOME_VAL,.75),1,2))
+train2$TIF = ifelse(train$TIF==0,0,ifelse(train$TIF<quantile(train$TIF,.75),1,2))
+train2$MVR_PTS = ifelse(train$MVR_PTS==0,0,ifelse(train$MVR_PTS<quantile(train$MVR_PTS,.75),1,2))
+train2$CLM_FREQ = ifelse(train$CLM_FREQ==0,0,ifelse(train$CLM_FREQ<3,1,2))
+train2$OLDCLAIM = ifelse(train$OLDCLAIM==0,0,ifelse(train$OLDCLAIM<quantile(train$OLDCLAIM,.75),1,2))
+train2$CAR_AGE = ifelse(train$CAR_AGE==1,1,ifelse(train$CAR_AGE<quantile(train$CAR_AGE,.5),2,3))
+train2$YOJ = ifelse(train$YOJ==0,0,ifelse(train$YOJ<quantile(train$YOJ,.75),1,2))
+train2$BLUEBOOK = log(train$BLUEBOOK)
+train2$TRAVTIME = log(train$TRAVTIME)
+
+```
+
+
+```{r,warning=FALSE, results='hide', cache.lazy=FALSE, message=FALSE}
+library(Hmisc)
+newHistData = train2[,theNumerics]
+hist(newHistData[1:6],na.big = FALSE)
+hist(newHistData[7:13],na.big=FALSE)
+```  
+
+
+# 3. BUILD MODELS  
+```{r}
+#Model 1 : Original dataset
+m1d = train
+m1d$TARGET_AMT = NULL
+m1 = glm(data=m1d,TARGET_FLAG~.,family=binomial)
+summary(m1)
+```  
+
+Right away, here is our base model for a logistic regression : The AIC and residual deviance *looks* high but we'll need to compare it to others. To find out for sure...I can tell by a quick glance at our p-values and significance codes that this is by far the best model. Too many features that only confound or overfit the model.  
+
+Before we throw this model away and only use it as a baseline; lets give it to our step function, to perform backward/forward stepwise.  
+
+```{r}
+#Model 2 : Original dataset + Stepwise model fitting
+
+m2 = step(m1,direction = 'both')
+summary(m2)
+```  
+
+Everything went up; + it dropped almost no features. We're throwing out these two models and we'll use the data I've modified.  
+
+```{r}
+#Model 3 : modified dataset
+m2d = train2
+m2d$TARGET_AMT = NULL
+m3 = glm(data=m2d,TARGET_FLAG~.,family=binomial)
+summary(m3)
+```  
+
+Dissapointing we didn't have an enormous decrease in AIC or deviance, but it is better than the base model. Lets try stepwise.  
+
+```{r}
+#Model 4 : modified dataset Stepwise
+ #HOMEKIDS, HOME_VAL,TIF,MVR_PTS, CLM_FREQ,OLDCLAIM,CAR_AGE, YOJ
+m3 = glm(data=m2d,TARGET_FLAG~  INCOME+HOME_VAL+MSTATUS+TRAVTIME+BLUEBOOK+CAR_USE+URBANICITY+TIF+CLM_FREQ+REVOKED,family=binomial)
+summary(m3)
+
+```  
+  
+With AIC and deviance going up by neglible amounts, while dropping 2/3rds of the predictors. Looks like a decent model.  
+
+Lets move on to linear models  
+
+```{r}
+l1d = train
+#l1d = l1d[ which(l1d$TARGET_FLAG==1),]
+#l1d$TARGET_FLAG = NULL
+l1 = lm(data=l1d,TARGET_AMT~.)
+summary(l1)
+```  
+R2 coefficient sitting at approx. .3 with a great p-value and OK f-statistic. Using everything we already have by default + tidying it looks like an acceptable model.  
+
+Next up; were going to only use the significant features and see what happens.  
+
+
+
+```{r}
+
+l2 = lm(data=l1d,TARGET_AMT~TARGET_FLAG+BLUEBOOK+MVR_PTS)
+summary(l2)
+```  
+
+Same R2, same great p-value. F-statistic sky rocketed which is OK in this situation since with only 3 features I don't think we're overfitting. I'm sad to see MVR_PTS become insignifcant.  Lets see if we can make the TARGET_AMOUNT a little more normal by logging it and taking away MVR_PTS.  
+
+```{R}
+l3 = lm(data=l1d,log(TARGET_AMT+1)~TARGET_FLAG+BLUEBOOK)
+summary(l3)  
+```  
+Interesting R2 at .99 with a crazy high F-statistic. I'd like to say I'm overfitting a model but perhaps claims are settled by their bluebooked value.  Just for fun lets see what my modified dataset could have done in one more model.  
+
+```{r}
+l4 = lm(data=train2,TARGET_AMT~TARGET_FLAG+SEX+REVOKED+BLUEBOOK)
+summary(l4)
+```  
+So by standard linear model metrics alone; it would seem my transformations and imputations were beneficial to a base model/dataset. The advantage of my modified dataset is that most of the calculations are factor based which helps counter-overfitting, nice!  
+
+# 4. SELECT MODELS  
+
+I choose logistic model 1 because of my failure to further increase the strength of the models significantly through data transformation. If my transformations don't help the model fit more than they hinder any chance of replication, they are better off left alone.  
+
+I also choose linear model 3. Lets evaluate them.  
+
+```{r}
+plot(l3)
+```  
+
+Looking at the normal Q-Q plot of our linear model. I see the model does not rely on normalacy whatsoever. Either the bluebook has a direct, almost 1 to 1 correlation on claim amounts, or there is a flaw in my methodology. In which I would go for linear model 4 with a .3 R2 and a great F-statistic; using just a little more variables but keeping it parsimonious.  
+
+Lets look at the binary model.  
+
+```{r}
+#https://www.r-bloggers.com/evaluating-logistic-regression-models/
+evalTest = m1d
+evalTest$TARGET_AMT = NULL
+trainE = createDataPartition(evalTest$TARGET_FLAG,p=.6,list=FALSE)
+trainingData = train[ trainE, ]
+testingData = train[ -trainE, ]
+pred = predict(m1, newdata=testingData)
+pred = ifelse(pred<.5,0,1)
+theMatrix = confusionMatrix(data=pred,testingData$TARGET_FLAG,positive = '1')
+theMatrix
+```  
+
+With an accuracy of .79 and high specificity. This model is acceptable, it is a shame I could not significantly improve it from the base I am using now.  
+
+```{r}
+theRock = roc(testingData$TARGET_FLAG, pred)
+plot(theRock,asp=NA,main='ROC')
+theRock$auc
+```  
+
+```{r}
+#Load Data
+finalPred1 =predict(m1, eval)
+probs = finalPred1
+classes = ifelse(finalPred1<.5,0,1)
+eval2=eval
+eval2$TARGET_FLAG = 1
+cost = predict(l3, eval2)
+answers = cbind(probs,classes,cost)
+write.csv(answers,'MMullerPredictions.csv')
+```
+
+## Code Appendix
+
+```{r, ref.label=knitr::all_labels(),echo=TRUE,eval=FALSE}
+```
