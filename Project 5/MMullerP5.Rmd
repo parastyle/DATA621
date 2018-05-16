@@ -1,0 +1,239 @@
+---
+title: "Project 5"
+author: "Michael Muller"
+date: "April 30, 2018"
+output:
+  pdf_document:
+    df_print: kable
+    highlight: tango
+  html_document:
+    df_print: paged
+  prettydoc::html_pretty:
+    highlight: github
+    theme: tactile
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+#https://stackoverflow.com/questions/9341635/check-for-installed-packages-before-running-install-packages
+requiredPackages = c('knitr','prettydoc','kableExtra','ggplot2','tidyr','plyr','dplyr','psych','corrplot','mice','VIM','reshape2','RCurl','caret','pROC','vcd','AER')
+for(p in requiredPackages){
+  if(!require(p,character.only = TRUE)) install.packages(p)
+  library(p,character.only = TRUE)
+}
+#Load Data
+train = read.csv('wine-training-data.csv',na.strings=c(""," ","NA"))
+train$ï..INDEX = NULL
+test = read.csv('wine-evaluation-data.csv',na.strings=c(""," ","NA"))
+test$IN = NULL
+```
+
+# Overview   
+
+## The task  
+  
+  Create three pairs of models out of the wine-crates-sold dataset.  
+  
+  |Poisson Regression models| *Predicting the count of wine-crates sold for a given year assuming the results follow a poisson distribution*  
+  
+  |Negative binomial models| *Predicting the count of wine-crates sold for a given year assuming the results follow a negative binomal distribution*  
+  
+  |Multiple linear regression model | *Predicting the number of wine-crates sold for a given year assuming the results follow some degree of linear correlation*  
+  
+## The restraints  
+  
+  Only data from the training_set may be used  
+  
+  |The training_set contains| *12795 raw observations*  
+  
+  |The training_set contains| *16 features (including index and targets)*  
+  
+# 1. DATA EXPLORATION  
+
+Taking a look into our dataset we see almost all the means/medians match up. We have some tough critics, with an average of 2 stars given, but the most impressive observation is that all 15 features other than AcidIndex have virtualy no skew, kurtosis, or standard error.  I believe this data has been tampered with beforehand (looks to be normalized) so I won't transform any of the data, but before we move on to making models we should see if we can impute some data using the means of otherwise normalized features. The last salient feature of this dataset is that we're doing 'count' data, with a high zero count. (Meaning many people buy 0 crates of wine) This is problematic for both all three models we'll be making. I'll consider the use of zero-augmented and zero-inflated models.  
+ 
+![Data Description](dataset.png)   
+
+
+
+Lets check out the data's sparsity using the MICE package in R.  
+Interpretting the figure below; we have quite a bit of missing data with almost a fourth of STARS missing.  
+Since our data has already been normalized, during imputation I'll be using means to impute objective features and predicting STARS (being subjective, but correlated to objective qualities) through OLS of the other features.  
+
+
+ 
+```{r,warning=FALSE, results='hide', cache.lazy=FALSE, message=FALSE, out.width='70%'}
+#Using the mice package to identify the missing variables again
+missingValuePlot = aggr(train, col=c('green','purple'),
+                    numbers=TRUE, sortVars=TRUE, only.miss=TRUE, combined=TRUE,
+                    labels=names(train), cex.axis=.4,
+                    gap=3, ylab=c("Missing data","Pattern"))
+```   
+
+
+
+```{r,warning=FALSE, results='hide', cache.lazy=FALSE, message=FALSE, out.width='80%'}
+library(Hmisc)
+hist(train[1:6],na.big = FALSE)
+```  
+
+Continued  
+
+```{r,warning=FALSE, results='hide', cache.lazy=FALSE, message=FALSE, out.width='80%'}
+library(Hmisc)
+hist(train[7:12],na.big=FALSE)
+```  
+.
+```{r,warning=FALSE, results='hide', cache.lazy=FALSE, message=FALSE, out.width='70%'}
+library(Hmisc)
+hist(train[13:15],na.big=FALSE)
+```    
+
+
+Before we move on, lets check our correlation matrix to see what variables might make good predictive, parsimonious model.  Not surprisingly, wine sells if critics love it, the label is appealing, and its not too acidic.  
+
+```{r}
+#Creating a correlation matrix to address multi-colinearity issues
+correlationMatrix = cor(train, use='complete.obs')
+corrplot(correlationMatrix, method="ellipse")
+```  
+
+# 2. DATA PREPERATION  
+
+Again, since our data has been pre-tampered with, values normalized. I don't see it fit or wise to make anymore transformations since the distributions are more or less normally distributed.  Transforming our features into buckets or some type of ordinal data
+seems like needless data loss.
+
+The results of data imputation + throwing out observations with missing values, we lost 2 out of almost 13k observations. We'll seperate some data before we train models, for cross validation later. Lets start making models  
+
+```{r}
+fakeTrain = train
+imputedData = mice(fakeTrain, m=2, maxit = 5, method = 'pmm', seed = 15)
+FakeTrain=mice::complete(imputedData,2)
+train$TARGET = fakeTrain$TARGET
+imputedData = mice(train, m=2, maxit =5, method = 'norm', seed = 15)
+train=mice::complete(imputedData,2)
+train = train[complete.cases(train), ]
+missingValuePlot = aggr(train, col=c('orange','yellow'),
+                    numbers=TRUE, sortVars=TRUE, only.miss=FALSE, combined=TRUE,
+                    labels=names(train), cex.axis=.4,
+                    gap=3, ylab=c("Missing data","Pattern"))
+
+evalTest = train
+trainE = createDataPartition(evalTest$TARGET,p=.6,list=FALSE)
+testingData = train[ -trainE, ]
+train = train[ trainE, ]
+
+```  
+
+# 3. BUILD MODELS  
+
+We'll start by building a standard poisson model, and build another zero-inflated poisson model because our target variable has a very high 0 occurence.  ZIP regression is used to model count data that has an excess of zeroes.  What ZIP does to account for the zeroes is it attempts to filter them through a logit model; and build answers only on those who pass the threshhold for 'above zero.'  
+
+First we'll build a base line model as always, with all the variables and analyze the results.  
+
+```{r}
+library(MASS)
+pBase = glm(TARGET ~., data=train,family='poisson')
+summary(pBase)
+```
+
+Seeing as we have almost no correlation to our TARGET in most variables, we can make our next model with a very parsimonious model of just STARS, LabelAppeal,and AcidIndex...Take out any variable deemed unfit and then run it through a zero-inflated poisson model for comparison.  
+
+```{r}
+m1P = glm(TARGET ~ STARS + LabelAppeal + AcidIndex , data = train, family='poisson')
+summary(m1P)
+```  
+
+We'll make two zero-inflated models, with and without our lowly correlated VolatileAcidity variable
+
+```{r}
+library(pscl)
+m2ZIP = zeroinfl(TARGET ~ STARS + LabelAppeal + AcidIndex, data = train, dist='poisson')
+m1ZIP = zeroinfl(TARGET ~ STARS + LabelAppeal + AcidIndex + VolatileAcidity, data = train, dist='poisson')
+summary(m1ZIP)
+summary(m2ZIP)
+```   
+
+Looking at our logit coefficients, it seems wise to include VolatileAcidity in any ZI model, as it definitely helps predict 0 counts. However the trade off is that it becomes a confounding variable while predicting the actual count above 0.  
+
+
+
+Lets build our negative binomial regression, then again with zero-inflation adjustment.  
+
+```{r}
+nbBase = MASS::glm.nb(TARGET ~., data = train)
+summary(nbBase)
+```  
+
+Same stats as the baseline poisson model, lets compare them using vuong test.  
+
+```{R}
+vuong(pBase,nbBase)
+```  
+
+Interesting to see poisson model being better in this case; because I'm betting the data is overdispersed. Lets look.  
+
+```{r}
+mean(train$TARGET)
+median(train$TARGET)
+AER::dispersiontest(pBase,trafo =2)
+```  
+
+Guess I was wrong; this may be a result of my imputation methods.  Anyway lets make a negative binomial, zero inflated model using everything statistically significant and one with our most salient variables. Lastly, if I assume that wholesalers buy wine according to customer preference. I imagine most customers like fancy looking, sweet tasting wines. So I'll make a minimal feature model including an interaction between alcohol (sweetness) and label appeal.    
+
+```{r}
+m3ZInb = zeroinfl(TARGET ~ STARS + LabelAppeal + Alcohol:LabelAppeal, data = train, dist='negbin')
+m2ZInb = zeroinfl(TARGET ~ STARS + LabelAppeal + AcidIndex, data = train, dist='negbin')
+m1ZInb = zeroinfl(TARGET ~ STARS + LabelAppeal + AcidIndex + VolatileAcidity + Alcohol, data = train, dist='negbin')
+summary(m3ZInb)
+summary(m1ZInb)
+summary(m2ZInb)
+```  
+
+I was completely wrong on my assumption of interaction. Lets move on to linear models.  
+
+```{r}
+baseLinear = lm(data=train,formula=TARGET~.)
+stepLinear = step(baseLinear,direction = 'backward')
+simpleLinear = lm(data=train, formula = TARGET ~ LabelAppeal+STARS)
+summary(simpleLinear)
+summary(stepLinear)
+```
+
+Interesting to see just using STARS and LabelAppeal can compete with a stepwise backward regression of every variable within .3 adjusted R2. While the stepwise regression has a better F-statistic in this case, I want to make sure I'm not overfitting a model with too many variables.   
+
+# 4. SELECT MODELS  
+
+I like that a two variable linear model can get a R2 of .42, however I would like a model that can delineate between will and won't sell. Previously our ZIP and ZINB were able to ascertain that we can best provide that information using acid index as well. 
+
+Testing the RMSE of our best ZIP model against the RMSE (while only using real predictions numbers (no decimals)) or our best (simplest) linear model we see that the simple linear model has a high RMSE at 1.44 to the ZIPS 1.35. I see no reason not to use AcidIndex, for a three variable ZIP model. Lets send in our predictions.  
+
+```{r}
+RMSE = function(m, o){
+  sqrt(mean((m - o)^2))
+}
+
+columns = c('prediction','answers')
+theZipValidation = as.data.frame(predict(m2ZIP,newdata=testingData))
+theZipValidation$answers = testingData$TARGET
+colnames(theZipValidation) = columns
+theZipValidation$prediction = round(theZipValidation$prediction,1)
+theLinearValidation = as.data.frame(predict(simpleLinear,newdata = testingData))
+theLinearValidation$answers = testingData$TARGET
+colnames(theLinearValidation) = columns 
+theLinearValidation$prediction = round(theLinearValidation$prediction,1)
+
+```
+
+```{r}
+print(c(RMSE(theLinearValidation$prediction,theLinearValidation$answers),RMSE(theZipValidation$prediction,theZipValidation$answers)))
+```
+
+```{r}
+answers = predict(m2ZIP,test)
+hist(answers)
+```  
+```{R}
+write.csv(answers,'MMullerPredictions.csv')
+```
+
